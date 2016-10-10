@@ -12,12 +12,29 @@
 #include <unistd.h>
 #include <ctype.h>
 
-#define BUFFER_SIZE    512
-#define ERROR_MSG_SIZE 256
+#define BUFFER_SIZE          512
+#define ERROR_MSG_SIZE       256
+#define MAX_BACKGROUND_JOBS  64
+
 #define SHELL_PROMPT         "mysh> "
 #define INVALID_ARGUMENTS    "Usage: mysh [batchFile]\n"
 #define BATCH_FILE_OPEN_FAIL "Error: Cannot open file %s\n"
 #define COMMAND_ERROR        "%s: Command not found\n"
+
+typedef struct JobStruct {
+  int jid;
+  int job_status;
+  int is_free_entry;
+  int wait_time;
+  pid_t pid;
+  char *command[32];
+}JobInfo;
+
+typedef struct JobInfoParamStruct {
+  JobInfo *Job;
+  int *jid;
+  int * is_bg_job;
+}JobInfoParam;
 
 void ErrorMessage(int line,const char *file) {
   
@@ -71,14 +88,68 @@ void ParseShellCommand (char *command_buf, char ** command) {
   command[loop] = NULL;
 }
 
-int ExecCommand( char ** command) {
+void AddBackgroundJob(char ** command, JobInfoParam *job_info_param) {
+  
+  JobInfo *Job = job_info_param->Job;
+  int *jid = job_info_param->jid;
+  int loop = 0;
 
+  for( ; loop < MAX_BACKGROUND_JOBS; loop++) {
+    
+    if( 0 == Job[loop].is_free_entry) {
+      Job[loop].is_free_entry = 1;
+      Job[loop].jid = *jid;
+      break;
+    }
+  }
+}
+void PrintBackgroundJob( JobInfo *Job) {
+  int loop = 0;
+  char message[32];
+  for( ; loop < MAX_BACKGROUND_JOBS; loop++) {
+    if(1 == Job[loop].is_free_entry) {
+      sprintf(message, "%d\n", Job[loop].jid);
+      write(STDOUT_FILENO, message, strlen(message));
+    }
+  }
+}
+void BackgroundJobHandler(char ** command, JobInfoParam *job_info_param) {
+  
+  int *is_bg_job = job_info_param->is_bg_job;
+  int loop=0;
+  *is_bg_job = 0;
+  while( command[loop]) {
+    if(0 == strcmp(command[loop],"&")) {
+      if( NULL == command[loop+1]) {
+        *is_bg_job = 1;
+        command[loop] = NULL;
+        AddBackgroundJob(command, job_info_param);
+      }
+    }
+      loop++;
+  }
+}
+
+int ExecCommand( char ** command) {
+  static JobInfo Job[MAX_BACKGROUND_JOBS];
+  static int jid = 0;
+  JobInfoParam job_info_param;
   char CommandError[256] = {0, };
   int child_stat;
+  int is_bg_job=0;
   pid_t child_pid;
   
   if(0 == strcmp(command[0],"exit"))
     return 0;
+  if(0 == strcmp(command[0],"j")) {
+    PrintBackgroundJob(Job);
+    return 1;
+  }  
+  jid++;
+  job_info_param.Job = Job;
+  job_info_param.jid = &jid;
+  job_info_param.is_bg_job = &is_bg_job;
+  BackgroundJobHandler(command, &job_info_param);
   child_pid = fork();
   if(0 == child_pid) {
     int rc = execvp(command[0],command);
@@ -86,6 +157,7 @@ int ExecCommand( char ** command) {
     write(STDERR_FILENO,CommandError,strlen(CommandError));
        return rc;
   } else {
+    if( ! is_bg_job)
     waitpid(child_pid, &child_stat, 0);
   }
     return 1;
@@ -121,7 +193,6 @@ int main(int argc, char *argv[]) {
 	  write (STDERR_FILENO, ErrorMsg, strlen(ErrorMsg));
           return 1;
 	} else {
-
           int rc = ExecBatch(fp, buffer, command);
           if( 0 == rc)
             return 0;
@@ -131,10 +202,11 @@ int main(int argc, char *argv[]) {
          write (STDERR_FILENO, INVALID_ARGUMENTS, strlen(INVALID_ARGUMENTS));
         return 1;
    } else {
-    
     PrintShellPrompt();
-
     if(fgets(buffer, BUFFER_SIZE, stdin) == NULL) {
+      if( feof(stdin)) {
+        return 0;
+      }
       ErrorMessage(__LINE__, __FILE__);
       continue;
     }
