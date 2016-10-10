@@ -2,7 +2,7 @@
 *  Description: Shell with Job Control 
 *  Date       :
 *  Version    :
-*  Author     : Gautam Singh
+*  Author     : Gautam Singh (gautamsingh@cs.wisc.edu)
 *********************************************************************************************/
 
 #include <stdio.h>
@@ -71,20 +71,40 @@ void ParseShellCommand (char *command_buf, char ** command) {
   command[loop] = NULL;
 }
 
-void ExecCommand( char ** command) {
+int ExecCommand( char ** command) {
 
   char CommandError[256] = {0, };
   int child_stat;
   pid_t child_pid;
+  
+  if(0 == strcmp(command[0],"exit"))
+    return 0;
   child_pid = fork();
   if(0 == child_pid) {
-    execvp(command[0],command);
+    int rc = execvp(command[0],command);
     sprintf(CommandError,COMMAND_ERROR,command[0]);
     write(STDERR_FILENO,CommandError,strlen(CommandError));
+       return rc;
   } else {
     waitpid(child_pid, &child_stat, 0);
   }
+    return 1;
+}
 
+int ExecBatch(FILE *fp, char * buffer, char ** command ) {
+  char *status = NULL;
+  while((status =  fgets(buffer, BUFFER_SIZE, fp))) {
+    TrimWhitespace (buffer);
+    ParseShellCommand(buffer, command);
+    write(STDOUT_FILENO,buffer,strlen(buffer));
+    write(STDOUT_FILENO,"\n",strlen("\n"));
+    int rc =  ExecCommand(command);
+    if( 0 == rc)
+      return 0;
+  }
+  if( NULL == status)
+    return 0;
+  return 1;
 }
 
 int main(int argc, char *argv[]) {
@@ -95,17 +115,22 @@ int main(int argc, char *argv[]) {
   while (1) { 
 
     if( 2 == argc && strlen (argv[1])) { 
-        FILE * fd = fopen(argv[1], "r");
-        if( NULL == fd) {
+        FILE * fp = fopen(argv[1], "r");
+        if( NULL == fp) {
           sprintf(ErrorMsg, BATCH_FILE_OPEN_FAIL, argv[1]);
 	  write (STDERR_FILENO, ErrorMsg, strlen(ErrorMsg));
           return 1;
+	} else {
+
+          int rc = ExecBatch(fp, buffer, command);
+          if( 0 == rc)
+            return 0;
 	} 
     } 
-    if(argc > 2) {
+   else if(argc > 2) {
          write (STDERR_FILENO, INVALID_ARGUMENTS, strlen(INVALID_ARGUMENTS));
         return 1;
-    } 
+   } else {
     
     PrintShellPrompt();
 
@@ -115,7 +140,10 @@ int main(int argc, char *argv[]) {
     }
     TrimWhitespace (buffer);
     ParseShellCommand(buffer, command);
-    ExecCommand(command);    
+   int rc =  ExecCommand(command);
+   if( 0 == rc)
+     return 0;
+   }
   }
   return 0;
 }
