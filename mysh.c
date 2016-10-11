@@ -11,6 +11,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <signal.h>
+#include <time.h>
 
 #define BUFFER_SIZE          512
 #define ERROR_MSG_SIZE       256
@@ -20,7 +22,8 @@
 #define INVALID_ARGUMENTS    "Usage: mysh [batchFile]\n"
 #define BATCH_FILE_OPEN_FAIL "Error: Cannot open file %s\n"
 #define COMMAND_ERROR        "%s: Command not found\n"
-
+#define INVALID_JID          "Invalid jid %d\n"
+#define JID_WAIT_TIME        "%d : Job %d terminated\n"
 typedef struct JobStruct {
   int jid;
   int job_status;
@@ -56,12 +59,10 @@ void TrimWhitespace (char *str) {
     str_ptr[0] = 0;
     return;
   }
-
   int loop=0;
   do {
     str[loop++] = *str_ptr++;
   } while(*str_ptr);
- 
   str_ptr--;
   while(loop > 0 && isspace(*str_ptr) )
     loop-- , str_ptr-- ;
@@ -93,26 +94,46 @@ void AddBackgroundJob(char ** command, JobInfoParam *job_info_param) {
   JobInfo *Job = job_info_param->Job;
   int *jid = job_info_param->jid;
   int loop = 0;
-
+  int loop2 = 0;
   for( ; loop < MAX_BACKGROUND_JOBS; loop++) {
     
-    if( 0 == Job[loop].is_free_entry) {
+    if( 0 == Job[loop].is_free_entry) { // 0 => free, 1 => occupied
       Job[loop].is_free_entry = 1;
       Job[loop].jid = *jid;
+      while(command[loop2]) {
+        Job[loop].command[loop2] = strdup(command[loop2]);
+        loop2++;
+      }
+      Job[loop].command[loop2] = NULL;
       break;
     }
   }
 }
+
 void PrintBackgroundJob( JobInfo *Job) {
   int loop = 0;
-  char message[32];
+  int loop2 = 0;
+  char message[512];
+  int stat;
   for( ; loop < MAX_BACKGROUND_JOBS; loop++) {
+  
     if(1 == Job[loop].is_free_entry) {
-      sprintf(message, "%d\n", Job[loop].jid);
+      if(0 !=  waitpid(Job[loop].pid, &stat, WNOHANG))
+        continue;
+
+      loop2 = 0;
+      sprintf(message, "%d :", Job[loop].jid);
+      while(Job[loop].command[loop2]) {
+        strcat(message, " ");
+        strcat(message, Job[loop].command[loop2]);
+        loop2++;
+      }
+      strcat(message, "\n");
       write(STDOUT_FILENO, message, strlen(message));
     }
   }
 }
+
 void BackgroundJobHandler(char ** command, JobInfoParam *job_info_param) {
   
   int *is_bg_job = job_info_param->is_bg_job;
@@ -130,6 +151,71 @@ void BackgroundJobHandler(char ** command, JobInfoParam *job_info_param) {
   }
 }
 
+void UpdatePidJidMap(pid_t pid, JobInfoParam *job_info_param) {
+  
+  static JobInfo *Job_s;
+  JobInfo *Job = job_info_param->Job;
+  int *jid = job_info_param->jid;
+  int loop = 0;
+  
+  if( Job)
+    Job_s = Job;
+
+  for( ; loop < MAX_BACKGROUND_JOBS; loop++) {
+    
+    if( NULL == jid) {   // Remove from waiting job
+      if( pid == Job_s[loop].pid) {
+	//Job_s[loop].jid = 0;
+        Job_s[loop].is_free_entry = 0;
+	break;
+      }
+
+    } else if( *jid == Job[loop].jid) { // Add to waiting job
+      Job[loop].pid = pid;
+      break;
+    }
+  }
+}
+
+void WaitforJob(int jid, JobInfo *Job) {
+  int loop = 0;
+  int child_stat;
+  time_t t1,t2;
+ 
+  char CommandError[256] = {0, };
+  for( ; loop < MAX_BACKGROUND_JOBS; loop++) {
+    if( jid == Job[loop].jid) {
+      (void) time(&t1);
+      waitpid(Job[loop].pid, &child_stat, 0);
+      (void) time(&t2);
+      Job[loop].jid = 0;
+      Job[loop].is_free_entry = 0;
+      sprintf(CommandError, JID_WAIT_TIME,(int)(t2-t1)*1000000, jid);
+      write(STDOUT_FILENO, CommandError, strlen(CommandError));
+      break;
+    } 
+  }
+  if( loop == MAX_BACKGROUND_JOBS) {
+    sprintf(CommandError, INVALID_JID, jid);
+    write(STDOUT_FILENO, CommandError, strlen(CommandError));
+  }
+}
+
+void child_termination_handler( int signum) {
+  pid_t pid;
+  int status;
+  JobInfoParam job_info_param;
+  memset (&job_info_param, 0, sizeof (job_info_param));
+  if(SIGCHLD == signum) {
+    pid = wait(&status);
+    if(-1 == pid) {
+    
+    } else {
+      // UpdatePidJidMap(pid, &job_info_param);
+    }
+  }
+}
+
 int ExecCommand( char ** command) {
   static JobInfo Job[MAX_BACKGROUND_JOBS];
   static int jid = 0;
@@ -138,11 +224,18 @@ int ExecCommand( char ** command) {
   int child_stat;
   int is_bg_job=0;
   pid_t child_pid;
-  
+  struct sigaction act;
+  memset (&act, 0, sizeof (act));
+  act.sa_handler = child_termination_handler;
+  //  sigaction(SIGCHLD, &act, NULL); 
   if(0 == strcmp(command[0],"exit"))
     return 0;
   if(0 == strcmp(command[0],"j")) {
     PrintBackgroundJob(Job);
+    return 1;
+  }
+  if(0 == strcmp(command[0],"myw")) {
+    WaitforJob(atoi(command[1]), Job);
     return 1;
   }  
   jid++;
@@ -159,6 +252,8 @@ int ExecCommand( char ** command) {
   } else {
     if( ! is_bg_job)
     waitpid(child_pid, &child_stat, 0);
+    else
+    UpdatePidJidMap(child_pid, &job_info_param);
   }
     return 1;
 }
